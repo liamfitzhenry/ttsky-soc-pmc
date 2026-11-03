@@ -30,8 +30,9 @@ module power_fsm (
     input wire dvfs_busy, // 1 = DVFS system is in the middle of a transition
     input wire dvfs_fault, // 1 = there's a problem with DVFS (regulator didn't respond properly, for example)
 
-    // rising edge of FAULT_CLR (from sync.v) ?????????????????????????????????????????????????
-    input wire fault_clr_rise,
+    // FAULT_CLR: active-high level input (synchronized). While HIGH, the FAULT
+    // state may be left (provided every other condition is also clear).
+    input wire fault_clr,
 
     // outputs to VOLTAGE REGULATORS
     output wire en_a, // 1 = rail enabled          
@@ -46,7 +47,7 @@ module power_fsm (
 );
 
     
-    localparam TIMER_BITS        = 8;
+    localparam TIMER_BITS = 24;
 
     // clock speed TBD, these are purely made-up for testing purposes
     localparam T_PG     = 20;  // wait for a power-good to change
@@ -71,8 +72,7 @@ module power_fsm (
         SHUTDOWN_A = 4'd10,  
         FAULT = 4'd11;  
 
-    reg [3:0] state;
-    reg [3:0] next_state;
+    reg [3:0] state, next_state;
 
     // timer to count settling times, etc....
     reg         tmr_load;
@@ -80,7 +80,7 @@ module power_fsm (
     wire        tmr_expired;
 
     // again, bits are a bit arbitrary right now as I haven't settled on a clock speed
-    timer #(.TIMER_BITS(TIMER_BITS)) u_timer (
+    timer #(.BITS(TIMER_BITS)) u_timer (
         .clk     (clk),
         .rst_n   (rst_n),
         .load    (tmr_load),
@@ -197,14 +197,17 @@ module power_fsm (
             end
 
             FAULT: begin
-                // Recovery needs every condition clear AND a rising edge
-                // on FAULT_CLR. Nothing happens if a condition is still bad.
-                if (!pg_a && !pg_b && !pg_c && !global_fault && !pwr_req && fault_clr_rise) begin
+                // Recovery needs every condition clear AND FAULT_CLR high.
+                // Nothing happens if a condition is still bad.
+                if (!pg_a && !pg_b && !pg_c && !global_fault && !pwr_req && fault_clr) begin
                     next_state = OFF;
                 end
             end
 
-            default: next_state = FAULT;  // fault if something unexpected happens
+            default: begin
+                next_state = FAULT;  // fault if something unexpected happens
+            end
+
 
         endcase
     end
@@ -243,7 +246,7 @@ module power_fsm (
                   (state == SHUTDOWN_C);
 
     // C enabled in all of the above except startup B and shutdown c
-    assign en_a = (state == STARTUP_C) || (state == STARTUP_SETTLE) || 
+    assign en_c = (state == STARTUP_C) || (state == STARTUP_SETTLE) || 
                   (state == RUN) || (state == THROTTLE) || (state == SHUTDOWN_SETTLE);
 
     // dvfs should only run when not in the middle of a startup/shutdown event
