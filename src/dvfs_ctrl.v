@@ -1,3 +1,4 @@
+
 // Sub-FSM for the dynamic voltage & frequency scaling (DVFS) function
 // FUNCTION: 
 // - alter the clock frequency and supply voltage to downstream processing based on requested performance
@@ -20,14 +21,14 @@ module dvfs_ctrl (
     input  wire clk_hi_ack, // 1 = divider confirmed high speed
 
     // output to voltage regulator
-    output reg  v_code, // 1 = V_HIGH, 0 = V_LOW
+    output wire v_code, // 1 = V_HIGH, 0 = V_LOW
 
     // output to clock divider
-    output reg  clk_div_code, // 1 = high speed request
+    output wire clk_div_code, // 1 = high speed request
 
     // output to power_fsm 
-    output reg  dvfs_busy, // high while a step sequence is running
-    output reg  dvfs_fault  // clock confirm timed out
+    output wire dvfs_busy, // high while a step sequence is running
+    output wire dvfs_fault  // clock confirm timed out
 );
 
     // same FSM-style encoding as in power_fsm
