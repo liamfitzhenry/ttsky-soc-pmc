@@ -8,46 +8,39 @@
 // - enables for all 3 voltage rails (goes to external regulator)
 // - handshake signals for the dvfs system (enable, etc)
 // - internal signals to represent throttled & fault conditions
-
 module power_fsm (
     input wire clk,
     input wire rst_n,
-    // signals in from SoC (CPU, GPU, ...)
-    input wire pwr_req, // 1 = turn ON the system
-    input wire perf_req, // 1 = high-workload task, need high-performance mode
+    
+    input wire pwr_req,
+    input wire [1:0] perf_req,
 
-    //signals in from VOLTAGE REGULATORS (external)
-    input wire pg_a, // 1 = voltage output is within a safe, expected range
+    input wire pg_a,
     input wire pg_b,
     input wire pg_c,
 
-    // signals in from SENSORS (external)
-    input wire therm_warn, // 1 = there's a problem
+    input wire therm_warn,
     input wire therm_crit,
     input wire oc, 
 
-    // signals in from DVFS system (internal)
-    input wire dvfs_busy, // 1 = DVFS system is in the middle of a transition
-    input wire dvfs_fault, // 1 = there's a problem with DVFS (regulator didn't respond properly, for example)
-
-    // FAULT_CLR: active-high level input (synchronized). While HIGH, the FAULT
-    // state may be left (provided every other condition is also clear).
+    input wire dvfs_busy,
+    input wire dvfs_fault,
     input wire fault_clr,
 
-    // outputs to VOLTAGE REGULATORS
-    output wire en_a, // 1 = rail enabled          
+    output wire en_a,
     output wire en_b,             
     output wire en_c,   
-
-    // outputs to INTERNAL SYSTEMS    
-    output wire dvfs_enable,  // 1 = dvfs system is allowed to run
-    output wire perf_target,  // 1 = high-workload requested AND it won't cause temp/OC issues
-    output wire in_fault, // 1 = fault state 
-    output wire in_throttled // 1 = throttled state
-);
-
     
-    localparam TIMER_BITS = 24;
+    output wire dvfs_enable,
+    output wire [1:0] perf_target,
+    output wire in_fault,
+    output wire in_throttled,
+    output wire fault_pulse,
+    output wire [2:0] fault_cause,
+    output wire [2:0] status_state
+);
+    
+    localparam TIMER_BITS = 6;   
 
     // clock speed TBD, these are purely made-up for testing purposes
     localparam T_PG     = 20;  // wait for a power-good to change
@@ -90,11 +83,14 @@ module power_fsm (
 
     // fault detections: these are the states when the PGOODs of a/b/c are EXPECTED to be high
     //if they are not high in any of these states, something is wrong and fault must be triggered
-    wire exp_a = (state == STARTUP_B) | (state == STARTUP_C) | (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE);
-    wire exp_b = (state == STARTUP_C) | (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE);
-    wire exp_c = (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE);
+    wire exp_a = (state == STARTUP_B) | (state == STARTUP_C) | (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE) |
+                 (state == SHUTDOWN_SETTLE) | (state == SHUTDOWN_C) | (state == SHUTDOWN_B);
+    wire exp_b = (state == STARTUP_C) | (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE) |
+                 (state == SHUTDOWN_SETTLE) | (state == SHUTDOWN_C);
+    wire exp_c = (state == STARTUP_SETTLE) | (state == RUN) | (state == THROTTLE) | (state == SHUTDOWN_SETTLE);
     // fault flag for pgood error (if any of the expected/observed pairs do not match)
-    wire pg_loss = (exp_a ^ pg_a) | (exp_b ^ pg_b) | (exp_c ^ pg_c);
+    // only an expected-high rail that drops counts (a rail being turned off is handled by the timeouts)
+    wire pg_loss = (exp_a & ~pg_a) | (exp_b & ~pg_b) | (exp_c & ~pg_c);
 
     // all fault conditions combined into one flag 
     wire global_fault = oc | therm_crit | pg_loss | dvfs_fault;
@@ -240,22 +236,43 @@ module power_fsm (
                   (state == RUN) || (state == THROTTLE) || (state == SHUTDOWN_SETTLE) || (state == SHUTDOWN_C) || 
                   (state == SHUTDOWN_B);
 
-    // B enabled in all of the above except startup a and shutdown b
     assign en_b = (state == STARTUP_B) || (state == STARTUP_C) || (state == STARTUP_SETTLE) || 
                   (state == RUN) || (state == THROTTLE) || (state == SHUTDOWN_SETTLE) || 
                   (state == SHUTDOWN_C);
 
-    // C enabled in all of the above except startup B and shutdown c
     assign en_c = (state == STARTUP_C) || (state == STARTUP_SETTLE) || 
                   (state == RUN) || (state == THROTTLE) || (state == SHUTDOWN_SETTLE);
 
-    // dvfs should only run when not in the middle of a startup/shutdown event
     assign dvfs_enable = (state == RUN) || (state == THROTTLE);
+    assign perf_target = (state == THROTTLE) ? 2'b00 : perf_req;
+    assign in_fault  = (state == FAULT); 
+    assign in_throttled = (state == THROTTLE); 
 
-    // Throttle: force the low level while in THROTTLE, otherwise follow the host
-    assign perf_target = (state == THROTTLE) ? 1'b0 : perf_req;
+    // ---- fault reporting for the register file ----
+    // one-clock pulse on entry to FAULT
+    assign fault_pulse = (next_state == FAULT) && (state != FAULT);
 
-    assign in_fault  = (state == FAULT); // internal fault flag
-    assign in_throttled = (state == THROTTLE); // internal throttle flag
+    wire in_startup  = (state >= STARTUP_A) && (state <= STARTUP_SETTLE);
+    wire in_shutdown = (state >= SHUTDOWN_SETTLE) && (state <= SHUTDOWN_A);
+
+    // cause codes from the T7 list, checked in priority order
+    assign fault_cause =
+        oc                                           ? 3'd2 :  // overcurrent
+        therm_crit                                   ? 3'd3 :  // critical thermal
+        dvfs_fault                                   ? 3'd4 :  // DVFS / VREG_ACK timeout
+        pg_loss                                      ? 3'd1 :  // PG dropped while expected high
+        (state == SHUTDOWN_SETTLE && tmr_expired)    ? 3'd4 :  // DVFS did not settle
+        (in_shutdown && tmr_expired)                 ? 3'd5 :  // PG stuck high after disable
+        (in_startup && tmr_expired)                  ? 3'd0 :  // PG timeout in startup
+                                                       3'd6;   // illegal state
+
+    // 3-bit state for the register file: 0 OFF, 1 STARTUP, 2 RUN, 3 THROTTLED, 4 SHUTDOWN, 5 FAULT
+    assign status_state =
+        (state == OFF)      ? 3'd0 :
+        in_startup          ? 3'd1 :
+        (state == RUN)      ? 3'd2 :
+        (state == THROTTLE) ? 3'd3 :
+        in_shutdown         ? 3'd4 :
+                              3'd5;
 
 endmodule

@@ -1,0 +1,11 @@
+0 reset
+76 normal startup: OFF -> RUN at perf 11
+736 dvfs high (11) -> normal (01)
+846 dvfs normal (01) -> low (00)
+846 dvfs low (00) -> high (11)
+926 thermal warning: high -> throttled (00) -> high
+1546 voltage regulator never acks: fault -> recover
+2776 rail B loss: fault -> recover
+3806 overcurrent: fault -> recover
+4176 critical thermal: fault -> recover
+5066 rail C dead at startup: PG timeout -> recover
